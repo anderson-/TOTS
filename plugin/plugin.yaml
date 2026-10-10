@@ -1,0 +1,8 @@
+name: stream-tap
+version: "0.2.0"
+description: "Publishes Hermes stream deltas (text + reasoning) and tool call to a UNIX DGRAM socket at /tmp/hermes-stream.sock. Payload: pid|platform|session_id|kind|writer|seq|text, kind T/R text/reasoning, S/E tool start/end."
+author: "ApeKind"
+hooks:
+  - on_session_start
+  - pre_tool_call
+  - post_tool_call

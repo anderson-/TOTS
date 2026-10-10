@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""Manual stream test: chat, thinking, tool events and lorem filler.
+
+Paragraphs read like an ordinary agent trace; the phrases from assets/thoughts.csv
+show up only now and then, at sentence starts or ends where the matcher looks.
+Tool activity uses the plugin's S/E frames (tool name in snake_case), and a
+lorem-ipsum session streams noise to sit between the useful snippets.
+
+SIGINT/SIGTERM stop the streams, which close their in-flight message (blank-line
+terminator or tool end frame) before the threads are joined and the process exits.
+"""
+
+import random
+import signal
+import socket
+import argparse
+import threading
+
+PARAGRAPHS = [
+    'Let me check the terminal size before drawing anything. '
+    'The columns and lines look sane. '
+    'Now I have the layout cached, so the slots can roll in. All good.\n\n',
+
+    'The stream arrives in small chunks. '
+    'I need to buffer them until a paragraph shows up. '
+    'Once the boundary lands, the matcher runs and the slots update. '
+    "That's fine for now.\n\n",
+
+    'Reading the font failed on the first glyph. '
+    'Let me verify the BDF header. '
+    "There's a mismatch in the ascent value. "
+    'Actually the file is gzipped, which explains it.\n\n',
+
+    'Let me read the session store again. '
+    'The queued batch is always the newest one. '
+    'But wait — the older text is dropped on purpose. '
+    'I should handle the empty case too.\n\n',
+
+    'The socket is bound and the poll loop wakes on every datagram. '
+    'Nothing surprising in the counters yet, so the display keeps the previous slots. '
+    'Two more paragraphs are still in flight.\n\n',
+
+    'Let me run the test suite and see what breaks. '
+    'The first failure is a rounding error in the progress bar. '
+    'Let me reconsider the arithmetic — integer division would be cleaner. Done.\n\n',
+
+    'Let me grep for the old symbol across the repo. '
+    'It still shows up in two files. '
+    "But there's nothing importing it, so a rename is safe. "
+    'Let me also update the docs.\n\n',
+
+    'Let me search the logs for the timeout. Nothing there. '
+    'Let me look at the retry loop instead. '
+    'Wait but the backoff is capped at ninety seconds.\n\n',
+
+    'Let me start with the parser. '
+    'The tokens are split on punctuation and dashes. '
+    "I'll use the same boundary regex as the matcher. "
+    'Let me write the new rule and test it.\n\n',
+
+    'Let me add a fallback for missing glyphs. '
+    'If an emoji has no bitmap, the slot is skipped silently. '
+    'Also check the cache before redrawing. '
+    'That keeps the idle loop cheap.\n\n',
+
+    'Hmm but the counts never settle. '
+    'I can reproduce it with two sessions and a slow writer. '
+    'The buffer keeps the last paragraph, which is by design.\n\n',
+
+    'Let me think about the flush timing. '
+    'Pending text is released after a short quiet period. '
+    'Actually let me wait for two full sentences instead. '
+    'Let me reconsider.\n\n',
+
+    'Let me look at the theme table to see the presets. '
+    'The amber and green entries are neighbours. '
+    'Let me use the classic one for the demo. '
+    'Now I have something readable.\n\n',
+
+    'Let me add the cache to the renderer. '
+    'The file is rewritten in place, then the demo reruns. '
+    'The stable pixels are reused, so the redraw stays cheap.\n\n',
+
+    'Let me search the test fixtures for the old constant. '
+    'It shows up in the docs as well. '
+    'Let me write the updated list and rerun. '
+    'But the fixtures still need a pass.\n\n',
+]
+
+TOOLS = ('read_file', 'search_files', 'write_file', 'terminal', 'patch')
+
+LOREM = (
+    'Lorem ipsum dolor sit amet consectetur adipiscing elit. '
+    'Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. '
+    'Ut enim ad minim veniam quis nostrud exercitation ullamco laboris. '
+    'Duis aute irure dolor in reprehenderit in voluptate velit esse cillum. '
+    'Excepteur sint occaecat cupidatat non proident sunt in culpa qui officia. '
+)
+
+
+def emit(sock, path, stop, *fields):
+    try:
+        sock.sendto('\x1f'.join(fields).encode('utf-8'), path)
+        return True
+    except OSError:
+        if stop is not None:
+            stop.wait(.5)
+        return False
+
+
+def close(sock, path, platform, sid, kind):
+    """Send the paragraph terminator so the consumer flushes this message."""
+    return emit(sock, path, None, '0', platform, sid, kind, '\n\n')
+
+
+def session(path, sid, platform, stop):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+        while not stop.is_set():
+            kind = 'R' if random.random() < .4 else 'T'
+            text = random.choice(PARAGRAPHS)
+            while text and not stop.is_set():
+                size = random.randint(3, 8)
+                chunk, text = text[:size], text[size:]
+                if not emit(sock, path, stop, '0', platform, sid, kind, chunk):
+                    return None
+                stop.wait(random.uniform(.03, .12))
+            if stop.is_set():
+                close(sock, path, platform, sid, kind)
+                return f'{sid} {kind}'
+            stop.wait(random.uniform(5, 10))
+    return None
+
+
+def lorem(path, sid, platform, stop):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+        dots = [i for i, char in enumerate(LOREM) if char == '.']
+        pos = dots[random.randrange(len(dots))] + 1
+        push, limit = 0, random.randint(50, 200)
+        while not stop.is_set():
+            size = random.randint(3, 6)
+            chunk = LOREM[pos:pos+size]
+            pos = (pos+size) % len(LOREM)
+            push += size
+            if push >= limit:
+                chunk += '\n\n' if random.random() < .3 else '\n'
+                push, limit = 0, random.randint(50, 200)
+            if not emit(sock, path, stop, '0', platform, sid, 'T', chunk):
+                return None
+            stop.wait(.02)
+        close(sock, path, platform, sid, 'T')
+        return f'{sid} lorem'
+
+
+def tools(path, sid, stop):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+        while not stop.is_set():
+            writer = 'tool_call_id:%d' % random.randrange(1 << 20)
+            name = random.choice(TOOLS)
+            emit(sock, path, stop, '0', '', sid, 'S', writer, '1', name)
+            if stop.wait(random.uniform(1, 4)):
+                emit(sock, path, None, '0', '', sid, 'E', writer, '2', name)
+                return f'{sid} tool'
+            emit(sock, path, stop, '0', '', sid, 'E', writer, '2', name)
+            stop.wait(random.uniform(4, 10))
+    return None
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--socket', default='/tmp/hermes-stream.sock')
+    args = parser.parse_args()
+    stop = threading.Event()
+
+    def on_signal(*_):
+        stop.set()
+    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGTERM, on_signal)
+
+    streams = [
+        (session, ('test-0', 'telegram')),
+        (session, ('test-1', 'agent')),
+        (lorem, ('test-2', 'cli')),
+        (tools, ('test-1',)),
+    ]
+    closed = {}
+
+    def run(index, target, rest):
+        closed[index] = target(args.socket, *rest, stop)
+
+    threads = [threading.Thread(target=run, args=(index, target, rest), daemon=True)
+               for index, (target, rest) in enumerate(streams)]
+    for thread in threads:
+        thread.start()
+    while not stop.wait(1):
+        pass
+    for thread in threads:
+        thread.join()
+    flushed = ', '.join(closed[index] for index in sorted(closed) if closed[index])
+    print('closed on shutdown: ' + flushed if flushed else 'shutdown: nothing was open')
+
+
+if __name__ == '__main__':
+    main()
