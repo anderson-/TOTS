@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
-"""Manual stream test: chat, thinking, tool events and lorem filler.
+"""Concurrent sessions alternating reasoning and output, with paragraphs and tool events."""
 
-Paragraphs read like an ordinary agent trace; the phrases from assets/thoughts.csv
-show up only now and then, at sentence starts or ends where the matcher looks.
-Tool activity uses the plugin's S/E frames (tool name in snake_case), and a
-lorem-ipsum session streams noise to sit between the useful snippets.
-
-SIGINT/SIGTERM stop the streams, which close their in-flight message (blank-line
-terminator or tool end frame) before the threads are joined and the process exits.
-"""
-
+import os
 import random
 import signal
 import socket
@@ -98,6 +90,18 @@ LOREM = (
 )
 
 
+def tremor(fast=(.02, .06), slow=(.05, .2), stall=.05):
+    slow_tokens = 0
+    while True:
+        if not slow_tokens and random.random() < stall:
+            slow_tokens = random.randint(3, 6)
+        if slow_tokens:
+            slow_tokens -= 1
+            yield random.uniform(*slow)
+        else:
+            yield random.uniform(*fast)
+
+
 def emit(sock, path, stop, *fields):
     try:
         sock.sendto('\x1f'.join(fields).encode('utf-8'), path)
@@ -108,47 +112,28 @@ def emit(sock, path, stop, *fields):
         return False
 
 
-def close(sock, path, platform, sid, kind):
-    """Send the paragraph terminator so the consumer flushes this message."""
-    return emit(sock, path, None, '0', platform, sid, kind, '\n\n')
-
-
-def session(path, sid, platform, stop):
+def session(path, sid, platform, kind, stop, paragraphs=PARAGRAPHS):
     with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+        pace, sequence = tremor(fast=(.03, .12), slow=(.1, .3)), 0
         while not stop.is_set():
-            kind = 'R' if random.random() < .4 else 'T'
-            text = random.choice(PARAGRAPHS)
+            text = ''.join(random.choices(paragraphs, k=random.randint(1, 3)))
             while text and not stop.is_set():
                 size = random.randint(3, 8)
                 chunk, text = text[:size], text[size:]
-                if not emit(sock, path, stop, '0', platform, sid, kind, chunk):
-                    return None
-                stop.wait(random.uniform(.03, .12))
-            if stop.is_set():
-                close(sock, path, platform, sid, kind)
-                return f'{sid} {kind}'
-            stop.wait(random.uniform(5, 10))
-    return None
+                sequence += 1
+                if not emit(sock, path, stop, str(os.getpid()), platform, sid, kind, sid, str(sequence), chunk):
+                    return
+                stop.wait(next(pace))
+            if not stop.is_set():
+                stop.wait(random.uniform(.3, 1))
+                if not stop.is_set():
+                    kind = 'T' if kind == 'R' else 'R'
+        emit(sock, path, None, str(os.getpid()), platform, sid, kind, sid, str(sequence+1), '\n\n')
+        return f'{sid} {kind}'
 
 
 def lorem(path, sid, platform, stop):
-    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
-        dots = [i for i, char in enumerate(LOREM) if char == '.']
-        pos = dots[random.randrange(len(dots))] + 1
-        push, limit = 0, random.randint(50, 200)
-        while not stop.is_set():
-            size = random.randint(3, 6)
-            chunk = LOREM[pos:pos+size]
-            pos = (pos+size) % len(LOREM)
-            push += size
-            if push >= limit:
-                chunk += '\n\n' if random.random() < .3 else '\n'
-                push, limit = 0, random.randint(50, 200)
-            if not emit(sock, path, stop, '0', platform, sid, 'T', chunk):
-                return None
-            stop.wait(.02)
-        close(sock, path, platform, sid, 'T')
-        return f'{sid} lorem'
+    return session(path, sid, platform, 'T', stop, [LOREM+'\n\n'])
 
 
 def tools(path, sid, stop):
@@ -180,8 +165,8 @@ def main():
     signal.signal(signal.SIGTERM, on_signal)
 
     streams = [
-        (session, ('test-0', 'telegram')),
-        (session, ('test-1', 'agent')),
+        (session, ('test-0', 'telegram', 'R')),
+        (session, ('test-1', 'agent', 'T')),
         (lorem, ('test-2', 'cli')),
         (tools, ('test-1',)),
     ]

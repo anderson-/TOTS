@@ -26,6 +26,19 @@ def clean(text, width):
     return ''.join(result)
 
 
+def wrapped(text, width):
+    for line in text.split('\n'):
+        if not line:
+            yield ''
+        while line:
+            part = clean(line, width)
+            if not part:
+                line = line[1:]
+                continue
+            yield part
+            line = line[len(part):]
+
+
 def centered(text, width):
     text = clean(text, width)
     used = sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in 'WF' else 1
@@ -227,11 +240,13 @@ class Terminal:
     def frame(self, store, cpu, rate, columns, lines, now=None, info=None):
         width = max(1, columns-1)
         rows, colors = ['']*lines, [self.theme[1]]*lines
-        if width < 12 or lines < 6:
+        groups_count = 1 if width >= 79 else 2 if width >= 48 else 3
+        info_top = lines-1-groups_count
+        if width < 12 or info_top < 4:
             rows[0] = 'Terminal too small'
             return rows, colors
-        base, fw, fh = self.layout(columns, lines)
-        left, top = (width-fw)//2, (lines-fh)//2
+        base, fw, fh = self.layout(columns, info_top+1)
+        left, top = (width-fw)//2, 1+(info_top-1-fh)//2
         body_key = columns, lines, self.slot_key()
         if self.body_key != body_key:
             body = ['']*lines
@@ -271,7 +286,7 @@ class Terminal:
         info_top = lines-1-len(groups)
         now = time.monotonic() if now is None else now
         if self.debug:
-            debug = list(store.debug()) or [('No active streams', 36)]
+            debug = list(store.debug()) or [('No active streams', '', 36)]
             tool_status = list(store.tool_status(now)) if store.tools else []
             tool_rows = []
             if tool_status:
@@ -279,12 +294,16 @@ class Terminal:
                 count = min(len(tool_status), len(gap))
                 start = max(0, (len(gap)-count)//2)
                 tool_rows = gap[start:start+count]
-            occupied = set(tool_rows)
-            available = [y for y in range(0, max(1, top-1)) if y not in occupied] + \
-                        [y for y in range(top+fh+1, info_top) if y not in occupied]
-            for y, (line, color) in zip(available, debug):
-                role = 3 if color == 36 else 4 if color == 33 else 5
-                rows[y], colors[y] = ' '+clean(line, width-1), self.theme[role]
+            available = [y for y in (*range(1, top-1), *range(top+fh+1, info_top))
+                         if y not in tool_rows]
+            debug = debug[:len(available)]
+            share, extra = divmod(len(available), len(debug)) if debug else (0, 0)
+            for index, (label, text, color) in enumerate(debug):
+                count = share+(index < extra)
+                panel, available = available[:count], available[count:]
+                content = [label, *list(wrapped(text, width-1))[-(count-1):]] if count > 1 else [label]
+                for y, line in zip(panel, content):
+                    rows[y], colors[y] = ' '+clean(line, width-1), self.theme[3 if y == panel[0] else 4 if color == 33 else 5]
             for y, (name, elapsed) in zip(tool_rows, tool_status):
                 rows[y] = centered(f'{name}  {elapsed:.0f}s', width)
                 colors[y] = self.theme[3]
@@ -307,8 +326,8 @@ class Terminal:
         else:
             header, color = '', None
         if self.debug:
-            size = clean(f'{columns}x{lines}', width)
-            start = max(0, (width-len(size))//2)
+            size = clean(f'{columns}x{lines}', max(0, width-len(header)-1))
+            start = max(0, min((width-len(size))//2, width-len(header)-len(size)-1))
             row = list(rows[0].ljust(width))
             row[start:start+len(size)] = size
             rows[0], colors[0] = ''.join(row), self.theme[3]
