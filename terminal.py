@@ -181,14 +181,15 @@ class Terminal:
 
     def layout(self, columns, lines):
         maximum, height_limit = min(columns-1, int(columns*3/5)), max(1, lines-4)
+        modes = ((1, 2, maximum),) if self.unicode else \
+                ((2, 1, maximum), (2, 1, columns-1), (1, 1, maximum))
         candidates = []
-        for repeat in ([1] if self.unicode else [2, 1]):
-            vertical = 2 if self.unicode else 1
+        for preference, (repeat, vertical, ceiling) in enumerate(modes):
             for base in range(22, 15, -2):
-                for scale in range(1, maximum//(3*base*repeat)+1):
+                for scale in range(1, ceiling//(3*base*repeat)+1):
                     width, height = 3*base*scale*repeat, base*scale//vertical
-                    if columns/3 <= width <= maximum and height <= height_limit:
-                        score = (0 if self.unicode or repeat == 2 else 1, 22-base, abs(width-columns/2))
+                    if columns/3 <= width <= ceiling and height <= height_limit:
+                        score = (preference, 22-base, abs(width-columns/2))
                         candidates.append((score, base, width, height))
         if candidates:
             _, base, width, height = min(candidates)
