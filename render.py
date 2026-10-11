@@ -1,4 +1,4 @@
-def render(glyphs, chars, unicode=True, pixel='#', scale=1):
+def render(glyphs, chars, unicode=True, pixel='#', scale=1, repeat=1):
     base = 16*max(1, scale)
     frame = [[0]*(base*len(chars)) for _ in range(base)]
     for index, char in enumerate(chars):
@@ -20,6 +20,7 @@ def render(glyphs, chars, unicode=True, pixel='#', scale=1):
                 lower = frame[y*2+1][x] if y*2+1 < base else 0
                 row.append(' ▄▀█'[upper*2+lower])
             else:
-                row.append(pixel if frame[y][x] else ' ')
+                cell = pixel if frame[y][x] else ' '
+                row.append(cell*repeat)
         lines.append(''.join(row))
     return lines

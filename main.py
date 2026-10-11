@@ -34,10 +34,11 @@ def theme_codes(value):
         raise argparse.ArgumentTypeError(str(error))
 
 
-def render_wrapped(glyphs, chars, columns, unicode=True, pixel='#'):
-    chars_per_row = max(1, columns // 16)
+def render_wrapped(glyphs, chars, columns, unicode=True, pixel='#', repeat=1):
+    chars_per_row = max(1, columns // (16*repeat))
     for start in range(0, len(chars), chars_per_row):
-        yield from render(glyphs, chars[start:start+chars_per_row], unicode, pixel)
+        yield from render(glyphs, chars[start:start+chars_per_row], unicode, pixel,
+                          repeat=repeat)
 
 
 def theme_command(theme, argv=None):
@@ -104,18 +105,19 @@ def main():
         except (OSError, ValueError) as error:
             parser.error(str(error))
         columns = shutil.get_terminal_size(fallback=(80, 24)).columns
+        repeat = 1 if args.ascii is None else 2
         for label, chars in fixed_items:
             print(label)
             available = [c for c in chars if c in glyphs]
             for line in render_wrapped(glyphs, available, columns,
-                                       args.ascii is None, args.ascii or '#'):
+                                       args.ascii is None, args.ascii or '#', repeat):
                 print(line)
             print()
         for thought, chars in matcher.rows:
             print(thought)
             available = [c for c in chars if c in glyphs]
             for line in render_wrapped(glyphs, available, columns,
-                                       args.ascii is None, args.ascii or '#'):
+                                       args.ascii is None, args.ascii or '#', repeat):
                 print(line)
             print()
         return
@@ -129,8 +131,9 @@ def main():
             parser.error(str(error))
         columns = shutil.get_terminal_size(fallback=(80, 24)).columns
         available = [c for c in chars if c in glyphs]
+        repeat = 1 if args.ascii is None else 2
         for line in render_wrapped(glyphs, available, columns,
-                                   args.ascii is None, args.ascii or '#'):
+                                   args.ascii is None, args.ascii or '#', repeat):
             print(line)
         sys.exit(1 if len(available) != len(chars) else 0)
     if not sys.stdin.isatty() or not sys.stdout.isatty():
