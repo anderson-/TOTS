@@ -146,7 +146,7 @@ def session(path, sid, platform, kind, stop, paragraphs=PARAGRAPHS):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--socket', default='/tmp/hermes-stream.sock')
-    parser.add_argument('--sessions', type=int, default=3, help='number of concurrent sessions (default: 3)')
+    parser.add_argument('--sessions', type=int, default=5, help='number of concurrent sessions')
     parser.add_argument('--seed', type=int, help='optional rand seed')
     args = parser.parse_args()
     if args.sessions < 1:

@@ -77,7 +77,11 @@ uninstall-service:
 
 .PHONY: run
 run:
-	$(PY) main.py
+	$(PY) main.py $(ARGS)
+
+.PHONY: render
+render:
+	time $(MAKE) run ARGS="--render-csv"
 
 .PHONY: run-vt
 run-vt:
@@ -91,8 +95,18 @@ stop:
 .PHONY: mock-stream
 mock-stream:
 	@printf 'Starting test stream. CTRL+c to exit.\n'
-	$(PY) -m tools.feed
+	$(PY) -m tools.feed $(ARGS)
 
 .PHONY: suggest
 suggest:
-	$(PY) -m tools.suggest
+	time $(PY) -m tools.suggest
+
+.PHONY: vhs
+VHS_TAPES := $(filter-out assets/vhs/term.tape assets/vhs/themes.tape,$(wildcard assets/vhs/*.tape))
+VHS_OUTPUTS := $(VHS_TAPES:.tape=.gif) $(VHS_TAPES:.tape=.mp4)
+
+vhs: $(VHS_OUTPUTS)
+	# export CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+assets/vhs/%.gif assets/vhs/%.mp4: assets/vhs/%.tape assets/vhs/term.tape
+	time vhs $<
