@@ -80,7 +80,10 @@ def main():
     parser.add_argument('--render-csv', action='store_true', help='print each CSV entry with its emojis, then exit')
     parser.add_argument('--render', metavar='STRING',
                         help='render the given emoji characters, then exit (1 if any is missing from the font)')
+    parser.add_argument('--seed', type=int, help='optional rand seed')
     args = parser.parse_args()
+    if args.seed is not None:
+        random.seed(args.seed)
     if args.words < 1:
         parser.error('--words must be positive')
     if args.ascii is None:

@@ -168,7 +168,10 @@ def tools(path, sid, stop):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--socket', default='/tmp/hermes-stream.sock')
+    parser.add_argument('--seed', type=int, help='optional rand seed')
     args = parser.parse_args()
+    if args.seed is not None:
+        random.seed(args.seed)
     stop = threading.Event()
 
     def on_signal(*_):
