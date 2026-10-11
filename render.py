@@ -19,8 +19,10 @@ def render(glyphs, chars, unicode=True, pixel='#', scale=1, repeat=1):
                 upper = frame[y*2][x]
                 lower = frame[y*2+1][x] if y*2+1 < base else 0
                 row.append(' ▄▀█'[upper*2+lower])
+            elif frame[y][x]:
+                cell = pixel*repeat
+                row.append(f'\x1b[7m{cell}\x1b[27m')
             else:
-                cell = pixel if frame[y][x] else ' '
-                row.append(cell*repeat)
+                row.append(' '*repeat)
         lines.append(''.join(row))
     return lines

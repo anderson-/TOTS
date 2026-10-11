@@ -70,6 +70,16 @@ def compact(value, rate=False):
         value /= 1024
 
 
+def runs(cells):
+    merged = []
+    for text, reverse in cells:
+        if merged and merged[-1][1] == reverse:
+            merged[-1] = (merged[-1][0]+text, reverse)
+        else:
+            merged.append((text, reverse))
+    return merged
+
+
 def displacement(t, direction, duration, size):
     def ease(p):
         return 4*p**3 if p < .5 else 1-(-2*p+2)**3/2
@@ -118,7 +128,7 @@ class Terminal:
         self.last_roll = 0
         self.last_source = ''
         self.pause_requested, self.paused, self.deferred = False, False, None
-        self.body_key, self.body = None, []
+        self.body_key, self.body, self.body_masks = None, [], []
         self.draw_key, self.info, self.next_info, self.next_draw = None, None, 0, 0
 
     def theme_key(self, key, now):
@@ -265,11 +275,11 @@ class Terminal:
         left, top = (width-fw)//2, 1+(info_top-1-fh)//2
         body_key = columns, lines, self.slot_key()
         if self.body_key != body_key:
-            body = ['']*lines
+            body, masks = ['']*lines, [None]*lines
             pixels = self.pixels(base)
             vertical = 2 if self.unicode else 1
             for y in range(fh):
-                row = []
+                row, cells = [], []
                 for x in range(fw):
                     sx = min(3*base-1, int((x+.5)*3*base/fw))
                     sy = min(base-1, int((y*vertical+.5)*base/(fh*vertical)))
@@ -279,9 +289,15 @@ class Terminal:
                         row.append(' ▄▀█'[first*2+pixels[sy2][sx]])
                     else:
                         row.append(self.pixel if first else ' ')
+                        cells.append((self.pixel if first else ' ', bool(first)))
                 body[top+y] = ' '*left+''.join(row)
-            self.body_key, self.body = body_key, body
+                if not self.unicode:
+                    masks[top+y] = runs([(' '*left, False), *cells])
+            self.body_key, self.body, self.body_masks = body_key, body, masks
         rows = self.body[:]
+        for y, mask in enumerate(self.body_masks):
+            if mask is not None:
+                colors[y] = [(text, self.theme[1], reverse) for text, reverse in mask]
         sessions, cpu, rate, total, queued = info or (len(store.sessions), cpu, rate, store.total, store.queued)
         number, unit = compact(rate, True)
         total, total_unit = compact(total)

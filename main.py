@@ -22,8 +22,8 @@ ASSETS = Path(__file__).resolve().parent / 'assets'
 
 
 def ascii_pixel(value):
-    if len(value) != 1 or not 33 <= ord(value) <= 126:
-        raise argparse.ArgumentTypeError('--ascii requires one visible ASCII character')
+    if len(value) != 1 or not 32 <= ord(value) <= 126:
+        raise argparse.ArgumentTypeError('--ascii requires one ASCII character')
     return value
 
 
@@ -67,8 +67,9 @@ def cpu_stat():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--ascii', nargs='?', const='#', type=ascii_pixel,
-                        help='use ASCII pixels, optionally specifying a character (default: #)')
+    parser.add_argument('--ascii', nargs='?', const=' ', type=ascii_pixel,
+                        help='use inverted ASCII pixels, optionally specifying a character '
+                             '(default: space, drawn with foreground and background swapped)')
     parser.add_argument('--theme', type=theme_codes,
                         help='six colors bg fg info debug thought output, no separators: '
                              'bk rd gn yl bl mg cy wh fg bg, + for bright (e.g. bgfgwhcygnyl)')
