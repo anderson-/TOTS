@@ -3,7 +3,7 @@ import re
 import stat
 import socket
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 PRIORITY = {'telegram': 5, 'cli': 3, 'agent': 2, 'cron': 1}
 SENTENCE = re.compile(r'[.!?。！？]+(?=\s|$)')
@@ -20,11 +20,21 @@ class Session:
     pending: str = ''
     queued: float = 0
     count: int = 0
+    offset: int = 0
+    pending_start: int = 0
+    marks: list = field(default_factory=list)
+
+    def switch(self, kind):
+        self.kind, self.buffer, self.display, self.pending = kind, '', '', ''
+        self.count, self.offset, self.marks = 0, 0, []
 
     def feed(self, text, now):
         self.count += len(text.encode('utf-8'))
         self.buffer = (self.buffer+text)[-65536:]
-        self.display = (self.display+text.replace('\r', ''))[-65536:]
+        display = self.display+text.replace('\r', '')
+        self.offset += max(0, len(display)-65536)
+        self.display = display[-65536:]
+        self.marks = [(a, b) for a, b in self.marks if b > self.offset]
         boundaries = list(re.finditer(r'\n\s*\n', self.buffer))
         if boundaries:
             end = boundaries[-1].end()
@@ -37,8 +47,10 @@ class Session:
             self.buffer = self.buffer[end:]
 
     def queue(self, text, now):
-        if text.strip():
-            self.pending, self.queued = text.strip(), now
+        text = text.replace('\r', '').strip()
+        if text:
+            self.pending, self.queued = text, now
+            self.pending_start = self.offset+self.display.rfind(text)
 
     def flush(self, now):
         if self.buffer.rstrip().endswith(('.', '!', '?', '。', '！', '？')):
@@ -47,6 +59,8 @@ class Session:
 
 
 class Store:
+    idle_timeout, session_timeout = 10, 90
+
     def __init__(self):
         self.sessions = {}
         self.total = 0
@@ -58,7 +72,7 @@ class Store:
         self.revision, self.source = 0, ''
         self.tools = {}
         self.tool_pending = deque(maxlen=64)
-        self.think = 0
+        self.selected, self.now = [], 0
 
     def open(self, path):
         if os.path.lexists(path):
@@ -90,44 +104,52 @@ class Store:
             self.pidfile = None
 
     def absorb(self, data, now):
+        self.now = now
         parts = data.decode('utf-8', 'replace').split('\x1f', 6)
         if len(parts) == 7:
-            _, platform, sid, kind, writer, sequence, text = parts
+            pid, platform, sid, kind, writer, sequence, text = parts
         elif len(parts) == 5:
-            _, platform, sid, kind, text = parts
+            pid, platform, sid, kind, text = parts
             writer = sequence = ''
         elif len(parts) == 2:
             platform, text = parts
-            sid = writer = sequence = ''
+            pid = sid = writer = sequence = ''
             kind = 'T'
         else:
             return
         if kind == 'S':
-            self.tools[writer] = (text or '', now)
+            candidates = [(key, session) for key, session in self.sessions.items() if key[0] == pid and key[2] == sid]
+            key, session = max(candidates, key=lambda entry: entry[1].last, default=((pid, platform, sid, ''), None))
+            if session is None:
+                session = self.sessions[key] = Session(platform, now)
+            if session.kind != 'S':
+                session.switch('S')
+            self.tools[pid, sid, writer] = (text, now, session)
+            session.display = '\n'.join(name for name, _, owner in self.tools.values() if owner is session)
+            session.last, session.marks = now, []
             if text:
-                self.tool_pending.append(text)
-            self.think = 0
+                self.tool_pending.append((session, text))
             self.revision += 1
             return
         if kind == 'E':
-            self.tools.pop(writer, None)
-            self.think = now
-            self.revision += 1
+            self.end_tool((pid, sid, writer), now)
             return
         if kind not in ('T', 'R'):
             return
-        if kind == 'T':
-            self.think = 0
-        elif not self.tools:
-            self.think = now
         try:
             seq = int(sequence) if sequence else 0
         except ValueError:
             return
-        key = (platform, sid, writer)
+        key = (pid, platform, sid, writer)
         session = self.sessions.get(key)
-        if session is None or session.kind != kind or (writer and seq and session.sequence and seq != session.sequence+1):
-            session = self.sessions[key] = Session(platform, now, kind=kind)
+        if session is None:
+            placeholder = next((k for k in self.sessions if k[0] == pid and k[2] == sid and not k[3] and k[1] in ('', platform)), None)
+            session = self.sessions.pop(placeholder) if placeholder is not None else Session(platform, now)
+            session.platform = platform
+            self.sessions[key] = session
+        if session.kind != kind or (writer and seq and session.sequence and seq != session.sequence+1):
+            session.switch(kind)
+        self.tools = {key: entry for key, entry in self.tools.items() if entry[2] is not session}
         if writer and seq:
             session.sequence = seq
         session.feed(text, now)
@@ -135,7 +157,26 @@ class Store:
         session.last = now
         self.revision += 1
 
+    def end_tool(self, key, now):
+        entry = self.tools.pop(key, None)
+        if entry:
+            session = entry[2]
+            names = [name for name, _, owner in self.tools.values() if owner is session]
+            if session.kind == 'S':
+                session.display, session.marks, session.last = '\n'.join(names), [], now
+                if not names:
+                    session.switch('I')
+            self.revision += 1
+
+    def highlight(self, spans):
+        for session, offset, left, right in self.selected:
+            session.marks.extend((offset+max(a, left)-left, offset+min(b, right)-left)
+                                 for a, b in spans if a < right and b > left)
+        if spans:
+            self.revision += 1
+
     def poll(self, now):
+        self.now = now
         if self.socket:
             for _ in range(64):
                 try:
@@ -143,26 +184,30 @@ class Store:
                 except BlockingIOError:
                     break
                 self.absorb(data, now)
-        if self.tools:
-            stale = [key for key, (_, started) in self.tools.items() if now-started >= 7200]
-            for key in stale:
-                del self.tools[key]
-        if self.think and now-self.think >= 90:
-            self.think = 0
+        for key, (_, started, _) in list(self.tools.items()):
+            if now-started >= 7200:
+                self.end_tool(key, now)
         for key, session in list(self.sessions.items()):
-            if now-session.last >= 90:
+            if session.kind != 'S' and now-session.last >= self.session_timeout:
                 del self.sessions[key]
                 self.revision += 1
-            elif now-session.last > .3:
+            elif session.kind != 'S' and now-session.last > .3:
                 session.flush(now)
         if self.tool_pending and now-self.last_conversion >= 2:
-            names = list(self.tool_pending)
+            events = list(self.tool_pending)
             self.tool_pending.clear()
-            self.source = 'tool / ' + ', '.join(names)
+            self.selected, parts, position = [], [], 0
+            for session, name in events:
+                start = session.display.rfind(name)
+                if session.kind == 'S' and start >= 0:
+                    self.selected.append((session, session.offset+start, position+1, position+1+len(name)))
+                parts.append('*'+name)
+                position += len(name)+3
+            self.source = 'tool / ' + ', '.join(name for _, name in events)
             self.last_conversion = now
-            return '\n\n'.join('*' + name for name in names)
+            return '\n\n'.join(parts)
         choices = []
-        for (_, sid, writer), session in self.sessions.items():
+        for (_, _, sid, writer), session in self.sessions.items():
             label = sid + (':'+writer if writer else '')
             priority = PRIORITY.get(session.platform, 0)
             if session.pending:
@@ -173,11 +218,13 @@ class Store:
             return None
         _, _, channel, self.source = max(choices, key=lambda entry: entry[:2])
         text, channel.pending = channel.pending, ''
+        self.selected = [(channel, channel.pending_start, 0, len(text))]
         self.last_conversion = now
         return text
 
     def deadline(self, now):
-        deadlines = [session.last+90 for session in self.sessions.values()]
+        deadlines = [session.last+self.session_timeout for session in self.sessions.values() if session.kind != 'S']
+        deadlines.extend(started+7200 for _, started, _ in self.tools.values())
         for session in self.sessions.values():
             if session.buffer.rstrip().endswith(('.', '!', '?', '。', '！', '？')):
                 deadlines.append(session.last+.3)
@@ -195,18 +242,23 @@ class Store:
 
     @property
     def thinking(self):
-        return bool(self.think) or any(s.kind == 'R' for s in self.sessions.values())
+        return any(s.kind == 'R' and self.now-s.last < self.idle_timeout for s in self.sessions.values())
 
     def tool_status(self, now):
-        return [(name, now-started) for name, started in
+        return [(name, now-started) for name, started, _ in
                 sorted(self.tools.values(), key=lambda entry: entry[1])]
 
-    def debug(self):
-        for (_, sid, writer), session in sorted(self.sessions.items()):
+    def debug(self, now):
+        for (_, _, sid, writer), session in sorted(self.sessions.items()):
             label = sid + (':'+writer if writer else '')
-            kind = 'thinking' if session.kind == 'R' else 'chat'
-            yield (f'{session.platform or "?"} #{label[-14:]} / {kind} [{session.count}]',
-                   session.display, 33 if session.kind == 'R' else 32)
+            kind = {'R': 'thinking', 'T': 'chat', 'S': 'tool', 'I': 'idle'}[session.kind]
+            text = session.display
+            if session.kind == 'S':
+                started = [started for _, started, owner in self.tools.values() if owner is session]
+                text += f'\n{now-min(started, default=now):.0f}s'
+            yield (f'{session.platform or "?"} #{label[-14:]} / {kind} [{session.count}]', text,
+                   33 if session.kind == 'R' else 32 if session.kind == 'T' else 36,
+                   [(a-session.offset, b-session.offset) for a, b in session.marks])
 
     def close(self):
         if self.socket:

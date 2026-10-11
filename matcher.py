@@ -50,18 +50,26 @@ class Matcher:
             self.table[key] = [char for char in chars if char in glyphs]
 
     def __call__(self, text, limit=None):
-        result, self.rules = [], {}
+        result, self.rules, self.spans, offset = [], {}, [], 0
         for fragment in BOUNDARY.split(text):
+            offset = text.find(fragment, offset)
+            matches = list(re.finditer(r'[^\W_]+(?:[\u0300-\u036f]+[^\W_]*)*', fragment))
             tokens = words(fragment)
+            positions = [(offset+match.start(), offset+match.end()) for match in matches for _ in words(match.group())]
+            if len(positions) != len(tokens):
+                positions = [(offset, offset+len(fragment))]*len(tokens)
             for end in (False, True):
                 for size in range(min(len(tokens), self.window), 0, -1):
                     key = tokens[-size:] if end else tokens[:size]
                     if self.table.get(key):
+                        chosen = positions[-size:] if end else positions[:size]
+                        self.spans.append((chosen[0][0], chosen[-1][1]))
                         for char in self.table[key]:
                             if char not in self.rules:
                                 self.rules[char] = self.labels[key]
                                 result.append(char)
                         break
+            offset += len(fragment)
         return result if limit is None else result[:limit]
 
 

@@ -27,24 +27,39 @@ def clean(text, width):
 
 
 def wrapped(text, width):
+    offset = 0
     for line in text.split('\n'):
         if not line:
-            yield ''
+            yield '', offset
         while line:
             part = clean(line, width)
-            if not part:
-                line = line[1:]
-                continue
-            yield part
-            line = line[len(part):]
+            if part:
+                yield part, offset
+            size = len(part) or 1
+            line, offset = line[size:], offset+size
+        offset += 1
 
 
-def centered(text, width):
+def tiles(width, start, end, count):
+    columns = min(count, max(1, width//24))
+    if not columns or end <= start:
+        return
+    count = min(count, columns*(end-start))
+    rows = math.ceil(count/columns)
+    for row in range(rows):
+        cells = min(columns, count-row*columns)
+        top, bottom = start+row*(end-start)//rows, start+(row+1)*(end-start)//rows
+        for column in range(cells):
+            yield column*width//cells, top, (column+1)*width//cells-column*width//cells, bottom-top
+
+
+def centered(text, width, center=True):
     text = clean(text, width)
     used = sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in 'WF' else 1
                for c in text)
     padding = width-used
-    return ' '*(padding//2)+text+' '*(padding-padding//2)
+    left = padding//2 if center else 0
+    return ' '*left+text+' '*(padding-left)
 
 
 def compact(value, rate=False):
@@ -238,6 +253,7 @@ class Terminal:
         return frame
 
     def frame(self, store, cpu, rate, columns, lines, now=None, info=None):
+        columns, lines = max(1, columns), max(1, lines)
         width = max(1, columns-1)
         rows, colors = ['']*lines, [self.theme[1]]*lines
         groups_count = 1 if width >= 79 else 2 if width >= 48 else 3
@@ -286,27 +302,31 @@ class Terminal:
         info_top = lines-1-len(groups)
         now = time.monotonic() if now is None else now
         if self.debug:
-            debug = list(store.debug()) or [('No active streams', '', 36)]
-            tool_status = list(store.tool_status(now)) if store.tools else []
-            tool_rows = []
-            if tool_status:
-                gap = list(range(top+fh+1, info_top))
-                count = min(len(tool_status), len(gap))
-                start = max(0, (len(gap)-count)//2)
-                tool_rows = gap[start:start+count]
-            available = [y for y in (*range(1, top-1), *range(top+fh+1, info_top))
-                         if y not in tool_rows]
-            debug = debug[:len(available)]
-            share, extra = divmod(len(available), len(debug)) if debug else (0, 0)
-            for index, (label, text, color) in enumerate(debug):
-                count = share+(index < extra)
-                panel, available = available[:count], available[count:]
-                content = [label, *list(wrapped(text, width-1))[-(count-1):]] if count > 1 else [label]
-                for y, line in zip(panel, content):
-                    rows[y], colors[y] = ' '+clean(line, width-1), self.theme[3 if y == panel[0] else 4 if color == 33 else 5]
-            for y, (name, elapsed) in zip(tool_rows, tool_status):
-                rows[y] = centered(f'{name}  {elapsed:.0f}s', width)
-                colors[y] = self.theme[3]
+            debug = list(store.debug(now)) or [('No active streams', '', 36, [])]
+            bands = [(a, b) for a, b in ((1, top-1), (top+fh+1, info_top)) if b > a]
+            panels, offset = [], 0
+            for index, (start, end) in enumerate(bands):
+                count = len(debug)//len(bands)+(index < len(debug)%len(bands))
+                cells = list(tiles(width, start, end, count))
+                panels.extend(zip(cells, debug[offset:offset+len(cells)]))
+                offset += len(cells)
+            for y in (y for start, end in bands for y in range(start, end)):
+                rows[y], colors[y] = '', []
+            for (x, y, cell, height), (label, text, role, marks) in panels:
+                content = [(clean(label, cell-2), -1)]
+                if height > 1:
+                    content += list(wrapped(text, cell-2))[-(height-1):]
+                for row in range(height):
+                    line, position = content[row] if row < len(content) else ('', -1)
+                    color = self.theme[3 if row == 0 or role == 36 else 4 if role == 33 else 5]
+                    edges = sorted({0, len(line), *(max(0, min(len(line), edge-position))
+                                    for span in marks for edge in span)}) if position >= 0 else [0, len(line)]
+                    chunks = [(' ', color, False)]
+                    chunks += [(line[a:b], color, position >= 0 and any(left <= position+a < right for left, right in marks))
+                               for a, b in zip(edges, edges[1:])]
+                    chunks.append((centered(line, cell-2, False)[len(line):]+' ', color, False))
+                    rows[y+row] += ''.join(part for part, _, _ in chunks)
+                    colors[y+row].extend(chunks)
             if top > 0:
                 rows[top-1] = ' '*left+centered(self.last_source or '-', fw)
                 colors[top-1] = self.theme[3]
@@ -368,7 +388,10 @@ class Terminal:
             row = clean(row, max(1, columns-1))
             entry = row, color
             if y >= len(self.previous) or self.previous[y] != entry:
-                if isinstance(color, tuple):
+                if isinstance(color, list):
+                    styled = ''.join(self.style(fg)+('\x1b[7m' if reverse else '')+text
+                                     for text, fg, reverse in color)
+                elif isinstance(color, tuple):
                     caption = row.lstrip(' ')
                     padding = row[:len(row)-len(caption)]
                     styled = self.style()+padding+self.style(*color)+caption

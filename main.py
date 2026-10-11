@@ -205,12 +205,15 @@ def main():
                 if not running:
                     break
                 text = store.poll(now)
+                last_activity = max(last_activity, max((s.last for s in store.sessions.values()), default=0))
                 think_pending = not demo and (think_pending or (store.thinking and not was_thinking))
                 was_thinking = store.thinking
                 is_tool = bool(text and store.source.startswith('tool / '))
                 if text and not demo:
                     emojis = list(dict.fromkeys(
                         c for c in emoji_chars(''.join(convert(text))) if c in glyphs))
+                    if convert is matcher:
+                        store.highlight(matcher.spans)
                     if is_tool and not emojis:
                         emojis = random.sample(tool_pool, min(3, len(tool_pool)))
                     if emojis:
@@ -244,7 +247,7 @@ def main():
                                     now, source="think")
                     last_activity, sleeping, think_pending = now, False, False
                 activity = max(last_activity, terminal.last_roll)
-                if not demo and not terminal.pause_requested and not sleeping and not store.busy and not store.thinking and now-activity > 10:
+                if not demo and not terminal.pause_requested and not sleeping and not store.busy and not store.thinking and now-activity >= store.idle_timeout:
                     terminal.insert(random.sample(idle_pool, min(3, len(idle_pool))), now, source="idle")
                     sleeping = True
                 terminal.advance(now-previous, now)

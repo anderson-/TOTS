@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Concurrent sessions alternating reasoning and output, with paragraphs and tool events."""
+"""Concurrent sessions cycling through reasoning, output and tool calls."""
 
 import os
 import random
@@ -116,6 +116,16 @@ def session(path, sid, platform, kind, stop, paragraphs=PARAGRAPHS):
     with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
         pace, sequence = tremor(fast=(.03, .12), slow=(.1, .3)), 0
         while not stop.is_set():
+            if kind == 'S':
+                writer, name = f'tool_call_id:{sid}:{sequence}', random.choice(TOOLS)
+                if not emit(sock, path, stop, str(os.getpid()), '', sid, 'S', writer, '1', name):
+                    return
+                stop.wait(random.uniform(1, 4))
+                emit(sock, path, None, str(os.getpid()), '', sid, 'E', writer, '2', name)
+                if stop.is_set():
+                    return f'{sid} tool'
+                kind = 'R'
+                continue
             text = ''.join(random.choices(paragraphs, k=random.randint(1, 3)))
             while text and not stop.is_set():
                 size = random.randint(3, 8)
@@ -127,34 +137,20 @@ def session(path, sid, platform, kind, stop, paragraphs=PARAGRAPHS):
             if not stop.is_set():
                 stop.wait(random.uniform(.3, 1))
                 if not stop.is_set():
-                    kind = 'T' if kind == 'R' else 'R'
-        emit(sock, path, None, str(os.getpid()), platform, sid, kind, sid, str(sequence+1), '\n\n')
+                    kind = 'T' if kind == 'R' else 'S'
+        if kind != 'S':
+            emit(sock, path, None, str(os.getpid()), platform, sid, kind, sid, str(sequence+1), '\n\n')
         return f'{sid} {kind}'
-
-
-def lorem(path, sid, platform, stop):
-    return session(path, sid, platform, 'T', stop, [LOREM+'\n\n'])
-
-
-def tools(path, sid, stop):
-    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
-        while not stop.is_set():
-            writer = 'tool_call_id:%d' % random.randrange(1 << 20)
-            name = random.choice(TOOLS)
-            emit(sock, path, stop, '0', '', sid, 'S', writer, '1', name)
-            if stop.wait(random.uniform(1, 4)):
-                emit(sock, path, None, '0', '', sid, 'E', writer, '2', name)
-                return f'{sid} tool'
-            emit(sock, path, stop, '0', '', sid, 'E', writer, '2', name)
-            stop.wait(random.uniform(4, 10))
-    return None
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--socket', default='/tmp/hermes-stream.sock')
+    parser.add_argument('--sessions', type=int, default=3, help='number of concurrent sessions (default: 3)')
     parser.add_argument('--seed', type=int, help='optional rand seed')
     args = parser.parse_args()
+    if args.sessions < 1:
+        parser.error('--sessions must be positive')
     if args.seed is not None:
         random.seed(args.seed)
     stop = threading.Event()
@@ -164,19 +160,14 @@ def main():
     signal.signal(signal.SIGINT, on_signal)
     signal.signal(signal.SIGTERM, on_signal)
 
-    streams = [
-        (session, ('test-0', 'telegram', 'R')),
-        (session, ('test-1', 'agent', 'T')),
-        (lorem, ('test-2', 'cli')),
-        (tools, ('test-1',)),
-    ]
     closed = {}
 
-    def run(index, target, rest):
-        closed[index] = target(args.socket, *rest, stop)
+    def run(index):
+        platform = ('telegram', 'agent', 'cli')[index%3]
+        closed[index] = session(args.socket, f'test-{index}', platform, 'R' if index%3 == 0 else 'T',
+                                stop, [LOREM+'\n\n'] if index%3 == 2 else PARAGRAPHS)
 
-    threads = [threading.Thread(target=run, args=(index, target, rest), daemon=True)
-               for index, (target, rest) in enumerate(streams)]
+    threads = [threading.Thread(target=run, args=(index,), daemon=True) for index in range(args.sessions)]
     for thread in threads:
         thread.start()
     while not stop.wait(1):
